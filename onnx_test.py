@@ -4,6 +4,8 @@ import numpy as np
 import onnxruntime as ort
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
+from onnx2torch import convert
+import onnx
 dataset = '20Datasets/NMeta_DiAtom_5Feat/heladeeprt'
 
 # Define Dataset
@@ -58,7 +60,7 @@ loss_function = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Training Loop
-for epoch in range(100):
+for epoch in range(10):
     for batch in dataloader_train:
         X, y = batch
         X, y = X.to(device), y.to(device)
@@ -84,6 +86,45 @@ for batch in dataloader_test:
 sample_input = torch.randn(341, 49, 62).to(device)
 torch.onnx.export(model, sample_input, "model.onnx", opset_version=11)
 
+# Load ONNX Model and Compare
+test_input = test_x.astype(np.float32)  # Ensure correct dtype
+session = ort.InferenceSession("model.onnx")
+onnx_outputs = session.run(None, {session.get_inputs()[0].name: test_input})
+
+# Compare Outputs
+pytorch_outputs = np.vstack(pytorch_outputs)
+difference = np.abs(pytorch_outputs - onnx_outputs[0])
+average_difference = np.mean(difference)
+
+results_df = pd.DataFrame({
+    'PyTorch Outputs': pytorch_outputs.flatten(),
+    'ONNX Outputs': onnx_outputs[0].flatten(),
+    'Difference': difference.flatten()
+})
+
+print(results_df[:20])  # Print a preview of the first few rows
+print("Average Difference:", average_difference)
+
+
+onnx_model = onnx.load("model.onnx")
+pytorch_onnx_model = convert(onnx_model)
+pytorch_onnx_model.to(device)
+
+optimizer = torch.optim.Adam(pytorch_onnx_model.parameters(), lr=0.001)
+
+for epoch in range(100):
+    for batch in dataloader_train:
+        X, y = batch
+        X, y = X.to(device), y.to(device)
+        optimizer.zero_grad()
+        output = pytorch_onnx_model(X)
+        loss = loss_function(output, y.view(-1, 1))
+        loss.backward()
+        optimizer.step()
+    print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
+
+sample_input = torch.randn(341, 49, 62).to(device)
+torch.onnx.export(model, sample_input, "model.onnx", opset_version=11)
 # Load ONNX Model and Compare
 test_input = test_x.astype(np.float32)  # Ensure correct dtype
 session = ort.InferenceSession("model.onnx")
