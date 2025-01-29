@@ -59,7 +59,7 @@ model = MyNet(input_size=62).to(device)
 loss_function = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# Training Loop
+# Train for 10 epochs
 for epoch in range(10):
     for batch in dataloader_train:
         X, y = batch
@@ -71,47 +71,22 @@ for epoch in range(10):
         optimizer.step()
     print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
 
-# Evaluation
-model.eval()
-pytorch_outputs = []
-for batch in dataloader_test:
-    X, y = batch
-    X, y = X.to(device), y.to(device)
-    output = model(X)
-    pytorch_outputs.append(output.cpu().detach().numpy())
-    loss = loss_function(output, y.view(-1, 1))
-    print(f"Test Loss: {loss.item():.4f}")
-
 # Save Model to ONNX
 sample_input = torch.randn(341, 49, 62).to(device)
 torch.onnx.export(model, sample_input, "model.onnx", opset_version=11)
 
-# Load ONNX Model and Compare
-test_input = test_x.astype(np.float32)  # Ensure correct dtype
+# Load ONNX Model and Compare Before Transfer Learning
+test_input = test_x.astype(np.float32)
 session = ort.InferenceSession("model.onnx")
-onnx_outputs = session.run(None, {session.get_inputs()[0].name: test_input})
+onnx_outputs_before = session.run(None, {session.get_inputs()[0].name: test_input})
 
-# Compare Outputs
-pytorch_outputs = np.vstack(pytorch_outputs)
-difference = np.abs(pytorch_outputs - onnx_outputs[0])
-average_difference = np.mean(difference)
-
-results_df = pd.DataFrame({
-    'PyTorch Outputs': pytorch_outputs.flatten(),
-    'ONNX Outputs': onnx_outputs[0].flatten(),
-    'Difference': difference.flatten()
-})
-
-print(results_df[:20])  # Print a preview of the first few rows
-print("Average Difference:", average_difference)
-
-
+# Convert ONNX back to PyTorch for Transfer Learning
 onnx_model = onnx.load("model.onnx")
 pytorch_onnx_model = convert(onnx_model)
 pytorch_onnx_model.to(device)
-
 optimizer = torch.optim.Adam(pytorch_onnx_model.parameters(), lr=0.001)
 
+# Train for another 100 epochs (Transfer Learning)
 for epoch in range(100):
     for batch in dataloader_train:
         X, y = batch
@@ -123,23 +98,47 @@ for epoch in range(100):
         optimizer.step()
     print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
 
-sample_input = torch.randn(341, 49, 62).to(device)
-torch.onnx.export(model, sample_input, "model.onnx", opset_version=11)
-# Load ONNX Model and Compare
-test_input = test_x.astype(np.float32)  # Ensure correct dtype
-session = ort.InferenceSession("model.onnx")
-onnx_outputs = session.run(None, {session.get_inputs()[0].name: test_input})
+# Evaluation
+pytorch_onnx_model.eval()
+pytorch_outputs = []
+for batch in dataloader_test:
+    X, y = batch
+    X, y = X.to(device), y.to(device)
+    output = pytorch_onnx_model(X)
+    pytorch_outputs.append(output.cpu().detach().numpy())
+    loss = loss_function(output, y.view(-1, 1))
+    print(f"Test Loss: {loss.item():.4f}")
 
-# Compare Outputs
 pytorch_outputs = np.vstack(pytorch_outputs)
-difference = np.abs(pytorch_outputs - onnx_outputs[0])
-average_difference = np.mean(difference)
 
-results_df = pd.DataFrame({
+# Save Fine-Tuned Model to ONNX
+torch.onnx.export(pytorch_onnx_model, sample_input, "fine_tuned_model.onnx", opset_version=11)
+
+# Load ONNX Model After Transfer Learning
+test_input = test_x.astype(np.float32)
+session = ort.InferenceSession("fine_tuned_model.onnx")
+onnx_outputs_after = session.run(None, {session.get_inputs()[0].name: test_input})
+
+# Compare Outputs Before and After Transfer Learning
+difference_before = np.abs(pytorch_outputs - onnx_outputs_before[0])
+difference_after = np.abs(pytorch_outputs - onnx_outputs_after[0])
+
+results_df_before = pd.DataFrame({
     'PyTorch Outputs': pytorch_outputs.flatten(),
-    'ONNX Outputs': onnx_outputs[0].flatten(),
-    'Difference': difference.flatten()
+    'ONNX Outputs Before': onnx_outputs_before[0].flatten(),
+    'Difference Before': difference_before.flatten()
 })
 
-print(results_df[:20])  # Print a preview of the first few rows
-print("Average Difference:", average_difference)
+results_df_after = pd.DataFrame({
+    'PyTorch Outputs': pytorch_outputs.flatten(),
+    'ONNX Outputs After': onnx_outputs_after[0].flatten(),
+    'Difference After': difference_after.flatten()
+})
+
+print("Performance Before Transfer Learning:")
+print(results_df_before[:20])
+print("Average Difference (Before Transfer Learning):", np.mean(difference_before))
+
+print("Performance After Transfer Learning:")
+print(results_df_after[:20])
+print("Average Difference (After Transfer Learning):", np.mean(difference_after))
